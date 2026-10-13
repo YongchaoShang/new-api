@@ -359,6 +359,14 @@ func TestDiscordAdmissionPrecedesAccountAndSessionCreation(t *testing.T) {
 			require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
 			assert.False(t, result.Success)
 			assert.Equal(t, expectedMessage, result.Message)
+			if expectedMessage == discordTestDenied {
+				var payload map[string]any
+				require.NoError(
+					t,
+					common.Unmarshal(response.Body.Bytes(), &payload),
+				)
+				assert.Equal(t, discordTestDenied, payload["message_key"])
+			}
 			assert.NotContains(t, response.Body.String(), "access_token")
 			_, err := model.GetAuthFlow(state, model.AuthFlowMatch{Purpose: model.AuthFlowPurposeOAuth})
 			assert.ErrorIs(t, err, model.ErrAuthFlowConsumed)

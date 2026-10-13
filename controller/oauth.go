@@ -667,7 +667,7 @@ func handleOAuthError(c *gin.Context, err error) {
 	case *oauth.OAuthError:
 		common.ApiError(c, e.Message)
 	case *oauth.AccessDeniedError:
-		common.ApiErrorMsg(c, e.Message)
+		common.ApiErrorT(c, e.Message)
 	case *oauth.TrustLevelError:
 		common.ApiErrorT(c, "Linux DO trust level does not meet the minimum required by administrator")
 	default:
