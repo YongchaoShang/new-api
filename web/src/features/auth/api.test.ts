@@ -23,7 +23,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { api, type RefreshOutcome } from '@/lib/api'
 import type { AuthBundle } from '@/stores/auth-store'
 
-import { executeLogout } from './api'
+import { createOAuthAuthorization, executeLogout } from './api'
 import { useOAuthLogin } from './hooks/use-oauth-login'
 import { consumeOAuthLoginRedirect } from './lib/oauth-callback-mode'
 
@@ -179,3 +179,37 @@ describe('logout coordination', () => {
     ).rejects.toBe(originalError)
   })
 })
+
+
+test('Discord login uses the server authorization URL and preserves the login destination', async () => {
+  const url =
+    'https://discord.com/oauth2/authorize?scope=identify+guilds+guilds.members.read&state=discord-state'
+  vi.spyOn(api, 'post').mockImplementation(async (path) => ({
+    data:
+      path === '/api/oauth/state'
+        ? {
+            success: true,
+            data: { flow_token: 'discord-state', authorization_url: url },
+          }
+        : { success: true },
+  }))
+  const open = vi.spyOn(window, 'open').mockReturnValue(null)
+  const { result } = renderHook(() =>
+    useOAuthLogin({ discord_client_id: 'client' }, '/console/personal')
+  )
+  await act(() => result.current.handleDiscordLogin())
+  expect(open).toHaveBeenCalledWith(url, '_self')
+  expect(consumeOAuthLoginRedirect('discord-state')).toBe('/console/personal')
+})
+
+test.each(['login', 'bind', 'verify'] as const)(
+  'Discord %s rejects authorization responses without a server URL',
+  async (intent) => {
+    vi.spyOn(api, 'post').mockResolvedValue({
+      data: { success: true, data: { flow_token: 'discord-state' } },
+    })
+    await expect(
+      createOAuthAuthorization('discord', intent)
+    ).rejects.toThrow('Failed to initialize OAuth')
+  }
+)

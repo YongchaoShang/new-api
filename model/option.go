@@ -189,6 +189,7 @@ func InitOptionMap() {
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()
 	maps.Copy(common.OptionMap, modelConfigs)
+	common.OptionMap[system_setting.DiscordGuildRulesOptionKey] = "[]"
 
 	common.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
@@ -204,9 +205,20 @@ func loadOptionsFromDatabase() {
 	}()
 	passkeyOptionMutex.Lock()
 	defer passkeyOptionMutex.Unlock()
-	options, _ := AllOption()
+	options, err := AllOption()
+	if err != nil {
+		// A failed initial read cannot establish that admission is unrestricted.
+		_ = system_setting.LoadDiscordGuildRules("")
+		common.SysLog(common.LogText("failed to update option map: %s", err.Error()))
+		return
+	}
 	passkeyOptions := make(map[string]string)
+	discordGuildRules := "[]"
 	for _, option := range options {
+		if option.Key == system_setting.DiscordGuildRulesOptionKey {
+			discordGuildRules = option.Value
+			continue
+		}
 		if IsPasskeyDomainOption(option.Key) {
 			passkeyOptions[option.Key] = option.Value
 			continue
@@ -217,6 +229,9 @@ func loadOptionsFromDatabase() {
 		}
 	}
 	applyPasskeyDomainOptions(passkeyOptions)
+	if err := updateOptionMap(system_setting.DiscordGuildRulesOptionKey, discordGuildRules); err != nil {
+		common.SysLog(common.LogText("failed to update option map: %s", err.Error()))
+	}
 }
 
 func SyncOptions(frequency int) {
@@ -228,6 +243,10 @@ func SyncOptions(frequency int) {
 }
 
 func validateOptionValue(key string, value string) error {
+	if key == system_setting.DiscordGuildRulesOptionKey {
+		_, err := system_setting.ParseDiscordGuildRules(value)
+		return err
+	}
 	if key == legacyAccessTokenRetireAtKey {
 		return errLegacyRetireAtReadOnly
 	}
@@ -250,6 +269,9 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
+	if key == system_setting.DiscordGuildRulesOptionKey {
+		return UpdateOptionsBulk(map[string]string{key: value})
+	}
 	if IsRequestPolicyOption(key) {
 		return UpdateRequestPolicyOptions(map[string]string{key: value})
 	}
@@ -287,6 +309,18 @@ func UpdateOptionsBulk(values map[string]string) error {
 	if len(values) == 0 {
 		return nil
 	}
+	if raw, ok := values[system_setting.DiscordGuildRulesOptionKey]; ok {
+		rules, err := system_setting.ParseDiscordGuildRules(raw)
+		if err != nil {
+			return err
+		}
+		encoded, err := common.Marshal(rules)
+		if err != nil {
+			return err
+		}
+		values = maps.Clone(values)
+		values[system_setting.DiscordGuildRulesOptionKey] = string(encoded)
+	}
 	for key := range values {
 		if IsPasskeyDomainOption(key) {
 			_, err := UpdatePasskeyDomainOptions(values, false, "")
@@ -318,6 +352,12 @@ func UpdateOptionsBulk(values map[string]string) error {
 		}
 	}
 
+	if _, ok := values[system_setting.DiscordGuildRulesOptionKey]; ok {
+		// Reload and mixed passkey transactions already hold this mutex. Keep
+		// the same request-policy -> passkey lock order through commit/publish.
+		passkeyOptionMutex.Lock()
+		defer passkeyOptionMutex.Unlock()
+	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		for k, v := range values {
 			option := Option{Key: k}
@@ -355,6 +395,9 @@ func updateOptionMap(key string, value string) (err error) {
 	common.OptionMapRWMutex.Lock()
 	defer common.OptionMapRWMutex.Unlock()
 	common.OptionMap[key] = value
+	if key == system_setting.DiscordGuildRulesOptionKey {
+		return system_setting.LoadDiscordGuildRules(value)
+	}
 
 	// 检查是否是模型配置 - 使用更规范的方式处理
 	if handleConfigUpdate(key, value) {

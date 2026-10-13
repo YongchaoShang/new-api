@@ -17,14 +17,31 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { X } from 'lucide-react'
-import { useState, useRef, type KeyboardEvent } from 'react'
+import {
+  useState,
+  useRef,
+  type KeyboardEvent,
+  type InputHTMLAttributes,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
-interface TagInputProps {
+interface TagInputProps
+  extends Pick<
+    InputHTMLAttributes<HTMLInputElement>,
+    | 'id'
+    | 'name'
+    | 'aria-label'
+    | 'aria-describedby'
+    | 'aria-invalid'
+    | 'inputMode'
+    | 'onBlur'
+  > {
+  inputValue?: string
+  onInputValueChange?: (value: string) => void
   value: string[]
   onChange: (tags: string[]) => void
   placeholder?: string
@@ -38,18 +55,26 @@ export function TagInput({
   placeholder,
   className,
   disabled = false,
+  inputValue: controlledInputValue,
+  onInputValueChange,
+  onBlur,
+  ...inputProps
 }: TagInputProps) {
   const { t } = useTranslation()
   const placeholderText = placeholder ?? t('Add tags...')
-  const [inputValue, setInputValue] = useState('')
+  const [localInputValue, setLocalInputValue] = useState('')
+  const inputValue = controlledInputValue ?? localInputValue
+  const setInputValue = (nextValue: string) => {
+    setLocalInputValue(nextValue)
+    onInputValueChange?.(nextValue)
+  }
   const inputRef = useRef<HTMLInputElement>(null)
 
   const addTag = (tag: string) => {
     const trimmed = tag.trim()
-    if (trimmed && !value.includes(trimmed)) {
-      onChange([...value, trimmed])
-      setInputValue('')
-    }
+    if (!trimmed) return
+    if (!value.includes(trimmed)) onChange([...value, trimmed])
+    setInputValue('')
   }
 
   const removeTag = (tagToRemove: string) => {
@@ -65,10 +90,11 @@ export function TagInput({
     }
   }
 
-  const handleBlur = () => {
+  const handleBlur: NonNullable<TagInputProps['onBlur']> = (event) => {
     if (inputValue.trim()) {
       addTag(inputValue)
     }
+    onBlur?.(event)
   }
 
   return (
@@ -87,7 +113,7 @@ export function TagInput({
               type='button'
               variant='ghost'
               size='icon-sm'
-              aria-label='Remove tag'
+              aria-label={t('Remove tag {{tag}}', { tag })}
               onClick={(e) => {
                 e.stopPropagation()
                 removeTag(tag)
@@ -100,6 +126,7 @@ export function TagInput({
         </Badge>
       ))}
       <input
+        {...inputProps}
         ref={inputRef}
         type='text'
         value={inputValue}

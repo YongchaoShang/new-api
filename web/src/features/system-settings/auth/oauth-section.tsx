@@ -52,6 +52,12 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 import {
+  DiscordGuildRules,
+  discordGuildRulesSchema,
+  parseDiscordGuildRules,
+  serializeDiscordGuildRules,
+} from './discord-guild-rules'
+import {
   buildOAuthCallbackUrl,
   resolveOAuthSiteUrl,
 } from './oauth-callback-url'
@@ -70,6 +76,11 @@ const oauthSchema = z.object({
     enabled: z.boolean(),
     client_id: z.string(),
     client_secret: z.string(),
+    guild_rules: discordGuildRulesSchema,
+    guild_rules_invalid: z.boolean().refine(
+      (invalid) => !invalid,
+      'Stored Discord rules are invalid. Replace them before saving.'
+    ),
   }),
   oidc: z.object({
     enabled: z.boolean(),
@@ -93,7 +104,7 @@ const oauthSchema = z.object({
   WeChatAccountQRCodeImageURL: z.string(),
 })
 
-type OAuthFormValues = z.infer<typeof oauthSchema>
+export type OAuthFormValues = z.infer<typeof oauthSchema>
 
 type FlatOAuthDefaults = {
   GitHubOAuthEnabled: boolean
@@ -102,6 +113,7 @@ type FlatOAuthDefaults = {
   'discord.enabled': boolean
   'discord.client_id': string
   'discord.client_secret': string
+  'discord.guild_rules': string
   'oidc.enabled': boolean
   'oidc.display_name': string
   'oidc.client_id': string
@@ -183,6 +195,7 @@ const buildFormDefaults = (defaults: FlatOAuthDefaults): OAuthFormValues => ({
     enabled: defaults['discord.enabled'],
     client_id: defaults['discord.client_id'] ?? '',
     client_secret: defaults['discord.client_secret'] ?? '',
+    ...parseDiscordGuildRules(defaults['discord.guild_rules']),
   },
   oidc: {
     enabled: defaults['oidc.enabled'],
@@ -216,6 +229,7 @@ const normalizeFormValues = (values: OAuthFormValues): FlatOAuthDefaults => ({
   'discord.enabled': values.discord.enabled,
   'discord.client_id': values.discord.client_id,
   'discord.client_secret': values.discord.client_secret,
+  'discord.guild_rules': serializeDiscordGuildRules(values.discord.guild_rules),
   'oidc.enabled': values.oidc.enabled,
   'oidc.display_name': values.oidc.display_name,
   'oidc.client_id': values.oidc.client_id,
@@ -352,20 +366,36 @@ export function OAuthSection(props: OAuthSectionProps) {
     }
 
     const normalized = normalizeFormValues(finalValues)
+    const savedRules = parseDiscordGuildRules(
+      baselineRef.current['discord.guild_rules']
+    )
     const changedKeys = (
       Object.keys(normalized) as Array<keyof FlatOAuthDefaults>
-    ).filter((key) => normalized[key] !== baselineRef.current[key])
+    ).filter((key) => {
+      if (key === 'discord.guild_rules') {
+        return (
+          savedRules.guild_rules_invalid ||
+          normalized[key] !== serializeDiscordGuildRules(savedRules.guild_rules)
+        )
+      }
+      return normalized[key] !== baselineRef.current[key]
+    })
 
     if (changedKeys.length === 0) {
       toast.info(t('No changes to save'))
       return
     }
 
-    for (const key of changedKeys) {
-      await updateOption.mutateAsync({
-        key,
-        value: normalized[key],
-      })
+    try {
+      for (const key of changedKeys) {
+        await updateOption.mutateAsync({
+          key,
+          value: normalized[key],
+        })
+      }
+    } catch {
+      // The mutation reports the error; preserve edits for retry.
+      return
     }
 
     baselineRef.current = normalized
@@ -378,15 +408,19 @@ export function OAuthSection(props: OAuthSectionProps) {
     toast.success(t('Form reset to saved values'))
   }
 
+  const handleSubmit = form.handleSubmit(onSubmit, (errors) => {
+    if (errors.discord) setActiveTab('discord')
+  })
+
   return (
     <>
       <FormNavigationGuard when={form.formState.isDirty} />
 
       <SettingsSection title={t('OAuth Integrations')}>
         <Form {...form}>
-          <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
+          <SettingsForm onSubmit={handleSubmit}>
             <SettingsPageFormActions
-              onSave={form.handleSubmit(onSubmit)}
+              onSave={handleSubmit}
               onReset={handleReset}
               isSaving={form.formState.isSubmitting}
               isResetDisabled={!form.formState.isDirty}
@@ -583,6 +617,7 @@ export function OAuthSection(props: OAuthSectionProps) {
                     </FormItem>
                   )}
                 />
+                <DiscordGuildRules />
               </TabsContent>
 
               <TabsContent value='oidc' className={oauthTabContentClassName}>
