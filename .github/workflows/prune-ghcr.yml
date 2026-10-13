@@ -1,0 +1,25 @@
+name: Prune Old GHCR Images
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: self-hosted
+
+    permissions:
+      packages: write
+
+    steps:
+      - name: Prune old container versions (keep last 20)
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: new-api
+          package-type: container
+          min-versions-to-keep: 20
+          ignore-versions: latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
