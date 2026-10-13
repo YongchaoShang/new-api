@@ -28,7 +28,6 @@ import { createServerError } from '@/lib/server-error-message'
 import { createOAuthAuthorization, createOAuthFlow, logout } from '../api'
 import {
   buildGitHubOAuthUrl,
-  buildDiscordOAuthUrl,
   buildOIDCOAuthUrl,
   buildLinuxDOOAuthUrl,
 } from '../lib/oauth'
@@ -112,11 +111,12 @@ export function useOAuthLogin(
     setIsLoading(true)
     try {
       await resetSession()
-      const state = await createOAuthFlow('discord', 'login')
-      rememberOAuthLoginRedirect(state, redirectTo)
-
-      const url = buildDiscordOAuthUrl(status.discord_client_id, state)
-      window.open(url, '_self')
+      const authorization = await createOAuthAuthorization('discord', 'login')
+      if (!authorization.authorizationUrl) {
+        throw new AuthOperationError('Failed to initialize OAuth')
+      }
+      rememberOAuthLoginRedirect(authorization.state, redirectTo)
+      window.open(authorization.authorizationUrl, '_self')
     } catch (error) {
       handleServerError(
         AuthOperationError.from(error, t('Failed to start Discord login'))

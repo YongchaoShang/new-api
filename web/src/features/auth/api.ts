@@ -197,6 +197,13 @@ export async function createOAuthAuthorization(
     }
   )
   if (res.data?.success) {
+    if (
+      provider === 'discord' &&
+      (typeof res.data.data?.authorization_url !== 'string' ||
+        !res.data.data.authorization_url)
+    ) {
+      throw new AuthOperationError('Failed to initialize OAuth')
+    }
     if (typeof res.data.data === 'string') return { state: res.data.data }
     if (typeof res.data.data?.flow_token === 'string') {
       return {

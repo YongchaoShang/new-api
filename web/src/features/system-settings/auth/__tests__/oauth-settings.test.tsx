@@ -23,7 +23,7 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axios from 'axios'
 import { createInstance, type i18n } from 'i18next'
@@ -46,6 +46,7 @@ const defaults: ComponentProps<typeof OAuthSection>['defaultValues'] = {
   'discord.enabled': false,
   'discord.client_id': '',
   'discord.client_secret': '',
+  'discord.guild_rules': '[]',
   'oidc.enabled': false,
   'oidc.display_name': '',
   'oidc.client_id': '',
@@ -334,6 +335,193 @@ describe('OAuth settings saves', () => {
         key: 'oidc.well_known',
         value: 'https://provider.example.com/discovery',
       })
+    )
+  })
+})
+
+
+describe('Discord server rules', () => {
+  it('saves pending roles without blur and preserves snowflake precision', async () => {
+    const user = userEvent.setup()
+    await renderSettings()
+    await user.click(screen.getByRole('tab', { name: 'Discord' }))
+    await user.click(screen.getByRole('button', { name: 'Add server rule' }))
+    await user.type(
+      screen.getByRole('textbox', { name: 'Server ID' }),
+      '18446744073709551615'
+    )
+    const roles = screen.getByRole('textbox', { name: 'Required role IDs' })
+    await user.type(roles, '123456789012345678')
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeEnabled()
+    fireEvent.submit(roles.closest('form')!)
+
+    await waitFor(() =>
+      expect(api.put).toHaveBeenCalledWith('/api/option/', {
+        key: 'discord.guild_rules',
+        value: '[{"guild_id":"18446744073709551615","role_ids":["123456789012345678"]}]',
+      })
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Reset' })).toBeDisabled()
+    )
+  })
+
+  it.each(['', '0', '01', '18446744073709551616'])(
+    'rejects invalid server ID %s without saving',
+    async (id) => {
+      const user = userEvent.setup()
+      await renderSettings()
+      await user.click(screen.getByRole('tab', { name: 'Discord' }))
+      await user.click(screen.getByRole('button', { name: 'Add server rule' }))
+      if (id) {
+        await user.type(screen.getByRole('textbox', { name: 'Server ID' }), id)
+      }
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+      expect(screen.getByRole('textbox', { name: 'Server ID' })).toHaveAttribute(
+        'aria-invalid',
+        'true'
+      )
+      expect(api.put).not.toHaveBeenCalled()
+    }
+  )
+
+  it('shows role errors and retains edits across tab switches until reset', async () => {
+    const user = userEvent.setup()
+    await renderSettings({
+      'discord.guild_rules': '[{"guild_id":"123","role_ids":[]}]',
+    })
+    await user.click(screen.getByRole('tab', { name: 'Discord' }))
+    await user.type(
+      screen.getByRole('textbox', { name: 'Required role IDs' }),
+      'not-an-id'
+    )
+    await user.click(screen.getByRole('tab', { name: 'GitHub' }))
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    expect(
+      await screen.findByRole('textbox', { name: 'Required role IDs' })
+    ).toHaveAttribute('aria-invalid', 'true')
+    expect(api.put).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Reset' }))
+    expect(screen.queryByText('not-an-id')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('textbox', { name: 'Required role IDs' })
+    ).toHaveValue('')
+  })
+
+  it.each([
+    'bad JSON',
+    '',
+    'null',
+    '[{"guild_id":"123"}]',
+    '[{"guild_id":123,"role_ids":[]}]',
+    '[{"guild_id":"123","role_ids":[],"extra":true}]',
+  ])('blocks corrupt stored rules %s instead of clearing them', async (rules) => {
+    const user = userEvent.setup()
+    await renderSettings({ 'discord.guild_rules': rules })
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    expect(
+      await screen.findByText(
+        'Stored Discord rules are invalid. Replace them before saving.'
+      )
+    ).toBeInTheDocument()
+    expect(api.put).not.toHaveBeenCalled()
+    await user.click(
+      screen.getByRole('button', { name: 'Replace invalid rules' })
+    )
+    expect(screen.getByRole('textbox', { name: 'Server ID' })).toHaveValue('')
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    expect(api.put).not.toHaveBeenCalled()
+  })
+
+  it('supports keyboard role removal and deliberately clearing the final server', async () => {
+    const user = userEvent.setup()
+    await renderSettings({
+      'discord.guild_rules': '[{"guild_id":"123","role_ids":["456"]}]',
+    })
+    await user.click(screen.getByRole('tab', { name: 'Discord' }))
+    await user.click(screen.getByRole('textbox', { name: 'Required role IDs' }))
+    await user.keyboard('{Backspace}')
+    expect(screen.queryByText('456')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Remove server rule' }))
+    expect(
+      screen.getByText('No rules: Discord server access is unrestricted.')
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await waitFor(() =>
+      expect(api.put).toHaveBeenCalledWith('/api/option/', {
+        key: 'discord.guild_rules',
+        value: '[]',
+      })
+    )
+  })
+
+  it('keeps rules editable after a rejected save and allows retry', async () => {
+    vi.mocked(api.put).mockResolvedValueOnce({
+      data: { success: false, message: 'Unable to save' },
+    })
+    const user = userEvent.setup()
+    await renderSettings({
+      'discord.guild_rules': '[{"guild_id":"123","role_ids":[]}]',
+    })
+    await user.click(screen.getByRole('tab', { name: 'Discord' }))
+    await user.type(
+      screen.getByRole('textbox', { name: 'Required role IDs' }),
+      '456'
+    )
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Save Changes' })).toBeEnabled()
+    )
+    expect(screen.getByText('456')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reset' })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(2))
+  })
+
+  it('keeps roles associated with their servers and rejects duplicate servers', async () => {
+    const user = userEvent.setup()
+    await renderSettings({
+      'discord.guild_rules': '[{"guild_id":"123","role_ids":["456"]}]',
+    })
+    await user.click(screen.getByRole('tab', { name: 'Discord' }))
+    await user.click(screen.getByRole('button', { name: 'Add server rule' }))
+    const server = screen.getAllByRole('textbox', { name: 'Server ID' })[1]
+    await user.type(server, '123')
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    expect(server).toHaveAccessibleDescription(
+      expect.stringContaining('Each Discord server can only appear once')
+    )
+    expect(api.put).not.toHaveBeenCalled()
+    await user.clear(server)
+    await user.type(server, '789')
+    await user.type(
+      screen.getAllByRole('textbox', { name: 'Required role IDs' })[1],
+      '987{Enter}987{Enter}'
+    )
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await waitFor(() =>
+      expect(api.put).toHaveBeenCalledWith('/api/option/', {
+        key: 'discord.guild_rules',
+        value: '[{"guild_id":"123","role_ids":["456"]},{"guild_id":"789","role_ids":["987"]}]',
+      })
+    )
+  })
+
+  it('updates rule labels and validation messages when the language changes', async () => {
+    const user = userEvent.setup()
+    await renderSettings()
+    await user.click(screen.getByRole('tab', { name: 'Discord' }))
+    await user.click(screen.getByRole('button', { name: 'Add server rule' }))
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await act(() => testI18n.changeLanguage('zh'))
+
+    expect(
+      screen.getByRole('textbox', { name: testI18n.t('Server ID') })
+    ).toHaveAccessibleDescription(
+      expect.stringContaining(testI18n.t('Enter a valid Discord ID'))
     )
   })
 })

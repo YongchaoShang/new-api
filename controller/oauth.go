@@ -1,8 +1,11 @@
 package controller
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -10,6 +13,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
@@ -19,6 +23,17 @@ import (
 )
 
 const oauthAuthFlowTTL = 10 * time.Minute
+
+// A separate cookie per transaction allows simultaneous Discord authorization
+// tabs while binding each state to the browser that started it.
+func discordOAuthStateCookie(state string) string {
+	prefix := "discord_oauth_"
+	if common.SessionCookieSecure {
+		prefix = "__Host-" + prefix
+	}
+	digest := sha256.Sum256([]byte(state))
+	return fmt.Sprintf("%s%x", prefix, digest[:16])
+}
 
 type oauthStateRequest struct {
 	Provider string          `json:"provider"`
@@ -134,6 +149,16 @@ func GenerateOAuthCode(c *gin.Context) {
 	if flowPayload.Telegram != nil {
 		data["authorization_url"] = flowPayload.Telegram.AuthorizationURL(state)
 	}
+	if request.Provider == "discord" {
+		authorizationURL, err := oauth.DiscordAuthorizationURL(state, request.Intent)
+		if err != nil {
+			handleOAuthError(c, err)
+			return
+		}
+		data["authorization_url"] = authorizationURL
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie(discordOAuthStateCookie(state), state, int(oauthAuthFlowTTL.Seconds()), "/", "", common.SessionCookieSecure, true)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -159,6 +184,16 @@ func HandleOAuth(c *gin.Context) {
 	if err != nil {
 		writeAccountStatusError(c, http.StatusForbidden, "State parameter is empty or mismatched")
 		return
+	}
+	if providerName == "discord" {
+		cookieName := discordOAuthStateCookie(state)
+		browserState, err := c.Cookie(cookieName)
+		if err != nil || subtle.ConstantTimeCompare([]byte(browserState), []byte(state)) != 1 {
+			writeAccountStatusError(c, http.StatusForbidden, "State parameter is empty or mismatched")
+			return
+		}
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie(cookieName, "", -1, "/", "", common.SessionCookieSecure, true)
 	}
 
 	consumeMatch := model.AuthFlowMatch{
@@ -305,6 +340,18 @@ func handleOAuthVerification(c *gin.Context, provider string, oauthUser *oauth.O
 }
 
 func handleOAuthLogin(c *gin.Context, provider oauth.Provider, oauthUser *oauth.OAuthUser, token *oauth.OAuthToken, flow *model.AuthFlow) {
+	// Membership admission must finish before any user or login session is created.
+	if flow.Provider == "discord" {
+		if err := (&oauth.DiscordProvider{}).CheckLoginAdmission(c.Request.Context(), token); err != nil {
+			reason := "verification_failed"
+			if _, denied := err.(*oauth.AccessDeniedError); denied {
+				reason = "requirements_not_met"
+			}
+			logger.LogWarn(c.Request.Context(), common.LogText("Discord OAuth admission failed: reason=%s, flow_id=%d", reason, flow.Id))
+			handleOAuthError(c, err)
+			return
+		}
+	}
 	// 7. Find or create user
 	var payload oauthFlowPayload
 	if err := common.UnmarshalJsonStr(flow.Payload, &payload); err != nil {

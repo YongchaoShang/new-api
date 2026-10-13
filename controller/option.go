@@ -415,7 +415,9 @@ func UpdateOption(c *gin.Context) {
 	}
 	err = model.UpdateOption(option.Key, option.Value.(string))
 	if err != nil {
-		if errors.Is(err, system_setting.ErrPasskeyRPIDInvalid) {
+		if errors.Is(err, system_setting.ErrDiscordGuildRulesInvalid) {
+			common.ApiErrorT(c, "Invalid Discord server or role rules")
+		} else if errors.Is(err, system_setting.ErrPasskeyRPIDInvalid) {
 			writeSecurityOperationError(c, err)
 		} else {
 			common.ApiError(c, err)

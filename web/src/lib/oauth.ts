@@ -44,22 +44,6 @@ export function buildGitHubOAuthUrl(clientId: string, state: string): string {
 }
 
 /**
- * Build Discord OAuth URL
- */
-export function buildDiscordOAuthUrl(clientId: string, state: string): string {
-  const url = new URL('https://discord.com/oauth2/authorize')
-  url.searchParams.set('client_id', clientId)
-  url.searchParams.set(
-    'redirect_uri',
-    `${window.location.origin}/oauth/discord`
-  )
-  url.searchParams.set('response_type', 'code')
-  url.searchParams.set('scope', 'identify+openid')
-  url.searchParams.set('state', state)
-  return url.toString()
-}
-
-/**
  * Build OIDC OAuth URL
  */
 export function buildOIDCOAuthUrl(
@@ -95,10 +79,7 @@ export function buildOAuthAuthorizationUrl(
       }
       break
     case 'discord':
-      if (status.discord_client_id) {
-        return buildDiscordOAuthUrl(status.discord_client_id, state)
-      }
-      break
+      throw new Error('Failed to initialize OAuth')
     case 'oidc':
       if (status.oidc_authorization_endpoint && status.oidc_client_id) {
         return buildOIDCOAuthUrl(

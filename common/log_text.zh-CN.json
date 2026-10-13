@@ -850,5 +850,6 @@
   "zhipu_image_get_b64_failed: %s": "智谱图片转 b64 失败: %s",
   "zhipu_image_missing_url": "智谱图片接口没有返回 URL",
   "¥%.6f quota": "¥%.6f 额度",
-  "＄%.6f quota": "＄%.6f 额度"
+  "＄%.6f quota": "＄%.6f 额度",
+  "Discord OAuth admission failed: reason=%s, flow_id=%d": "Discord OAuth 准入失败：原因=%s，流程 ID=%d"
 }
