@@ -508,6 +508,9 @@ export const STATIC_I18N_KEYS = [
   'Param Override',
   'Override request parameters',
 
+  // Daily check-in eligibility messages returned by the backend.
+  'Your current balance exceeds the check-in eligibility quota. Please avoid repeated check-ins.',
+
   // Profile / 2FA
   'Backed up',
   'Not backed up',

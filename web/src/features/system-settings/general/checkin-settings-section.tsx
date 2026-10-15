@@ -47,6 +47,15 @@ const schema = z.object({
   enabled: z.boolean(),
   minQuota: z.coerce.number().int().min(0),
   maxQuota: z.coerce.number().int().min(0),
+  allowedQuota: z
+    .string()
+    .trim()
+    .refine(
+      (value) =>
+        value === '' ||
+        (/^\d+$/.test(value) && Number.isSafeInteger(Number(value))),
+      'Check-in eligibility quota must be empty or a non-negative safe integer'
+    ),
 })
 
 type Values = z.infer<typeof schema>
@@ -58,6 +67,7 @@ export function CheckinSettingsSection({
     enabled: boolean
     minQuota: number
     maxQuota: number
+    allowedQuota: string
   }
 }) {
   const { t } = useTranslation()
@@ -69,6 +79,8 @@ export function CheckinSettingsSection({
       enabled: defaultValues.enabled,
       minQuota: defaultValues.minQuota,
       maxQuota: defaultValues.maxQuota,
+      allowedQuota:
+        defaultValues.allowedQuota === 'null' ? '' : defaultValues.allowedQuota,
     },
   })
 
@@ -77,25 +89,35 @@ export function CheckinSettingsSection({
 
   async function onSubmit(values: Values) {
     const updates: Array<{ key: string; value: string }> = []
+    const savedValues = form.formState.defaultValues
+    const allowedQuota =
+      values.allowedQuota === '' ? '' : String(Number(values.allowedQuota))
 
-    if (values.enabled !== defaultValues.enabled) {
+    if (values.enabled !== savedValues?.enabled) {
       updates.push({
         key: 'checkin_setting.enabled',
         value: String(values.enabled),
       })
     }
 
-    if (values.minQuota !== defaultValues.minQuota) {
+    if (values.minQuota !== savedValues?.minQuota) {
       updates.push({
         key: 'checkin_setting.min_quota',
         value: String(values.minQuota),
       })
     }
 
-    if (values.maxQuota !== defaultValues.maxQuota) {
+    if (values.maxQuota !== savedValues?.maxQuota) {
       updates.push({
         key: 'checkin_setting.max_quota',
         value: String(values.maxQuota),
+      })
+    }
+
+    if (allowedQuota !== savedValues?.allowedQuota) {
+      updates.push({
+        key: 'checkin_setting.allowed_quota',
+        value: allowedQuota === '' ? 'null' : allowedQuota,
       })
     }
 
@@ -104,11 +126,16 @@ export function CheckinSettingsSection({
       return
     }
 
-    for (const update of updates) {
-      await updateOption.mutateAsync(update)
+    try {
+      for (const update of updates) {
+        await updateOption.mutateAsync(update)
+      }
+    } catch {
+      // The mutation reports the error; keep the unsaved input for retry.
+      return
     }
 
-    form.reset(values)
+    form.reset({ ...values, allowedQuota })
   }
 
   return (
@@ -185,6 +212,31 @@ export function CheckinSettingsSection({
                     </FormControl>
                     <FormDescription>
                       {t('Maximum quota amount awarded for check-in')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='allowedQuota'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Check-in eligibility quota')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='text'
+                        inputMode='numeric'
+                        placeholder={t('No limit')}
+                        disabled={updateOption.isPending || isSubmitting}
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Leave empty for no limit. Check-in is allowed when your balance is at or below this quota.'
+                      )}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
