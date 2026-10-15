@@ -262,6 +262,9 @@ func validateOptionValue(key string, value string) error {
 	if key == operation_setting.LogMaxRangeDaysOptionKey {
 		return operation_setting.ValidateLogMaxRangeDays(value)
 	}
+	if key == operation_setting.CheckinAllowedQuotaOptionKey {
+		return operation_setting.ValidateCheckinAllowedQuota(value)
+	}
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
 	}
@@ -269,7 +272,7 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
-	if key == system_setting.DiscordGuildRulesOptionKey {
+	if key == system_setting.DiscordGuildRulesOptionKey || key == operation_setting.CheckinAllowedQuotaOptionKey {
 		return UpdateOptionsBulk(map[string]string{key: value})
 	}
 	if IsRequestPolicyOption(key) {
@@ -386,6 +389,13 @@ func UpdateOptionsBulk(values map[string]string) error {
 }
 
 func updateOptionMap(key string, value string) (err error) {
+	if key == operation_setting.CheckinAllowedQuotaOptionKey {
+		if err := operation_setting.ValidateCheckinAllowedQuota(value); err != nil {
+			return err
+		}
+		// The pointer config loader recognizes the exact null sentinel.
+		value = strings.TrimSpace(value)
+	}
 	if key == retiredThemeOptionKey || key == legacyAccessTokenRetireAtKey {
 		common.OptionMapRWMutex.Lock()
 		delete(common.OptionMap, key)
