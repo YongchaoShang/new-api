@@ -64,7 +64,14 @@ function makeLog(other: LogOtherData): UsageLog {
   }
 }
 
-function renderDetails(other: LogOtherData, promptTokens = 0): QueryClient {
+function renderDetails(
+  other: LogOtherData,
+  promptTokens = 0,
+  access: { isAdmin: boolean; isRoot: boolean } = {
+    isAdmin: false,
+    isRoot: false,
+  }
+): QueryClient {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -80,8 +87,8 @@ function renderDetails(other: LogOtherData, promptTokens = 0): QueryClient {
     <QueryClientProvider client={queryClient}>
       <DetailsDialog
         log={{ ...makeLog(other), prompt_tokens: promptTokens }}
-        isAdmin={false}
-        isRoot={false}
+        isAdmin={access.isAdmin}
+        isRoot={access.isRoot}
         open
         onOpenChange={() => undefined}
       />
@@ -94,20 +101,62 @@ function rowValue(label: string): string | null {
   return screen.getByText(label).nextElementSibling?.textContent ?? null
 }
 
-test('shows the recorded request and response models in log details', () => {
-  const queryClient = renderDetails({
+test.each([false, true])(
+  'shows the recorded request and response models in administrator log details (root=%s)',
+  (isRoot) => {
+    const queryClient = renderDetails(
+      {
+        response_model: {
+          requested_model: 'requested-model',
+          upstream_model: 'mapped-model',
+          returned_model: 'unexpected-model',
+        },
+      },
+      0,
+      { isAdmin: true, isRoot }
+    )
+    expect(screen.getByText('Response model: unexpected-model')).toBeVisible()
+    expect(rowValue('Request Model')).toBe('requested-model')
+    expect(rowValue('Upstream Model')).toBe('mapped-model')
+    expect(screen.getByText('unexpected-model')).toBeVisible()
+    queryClient.clear()
+  }
+)
+
+test.each([
+  {},
+  { is_model_mapped: true, upstream_model_name: 'mapped-model' },
+  {
     response_model: {
-      requested_model: 'requested-model',
+      requested_model: 'observation-request-model',
       upstream_model: 'mapped-model',
       returned_model: 'unexpected-model',
     },
-  })
-  expect(screen.getByText('Response model: unexpected-model')).toBeVisible()
-  expect(rowValue('Request Model')).toBe('requested-model')
-  expect(rowValue('Upstream Model')).toBe('mapped-model')
-  expect(screen.getByText('unexpected-model')).toBeVisible()
-  queryClient.clear()
-})
+  },
+  {
+    is_model_mapped: true,
+    upstream_model_name: 'mapped-model',
+    response_model: {
+      requested_model: 'observation-request-model',
+      upstream_model: 'mapped-model',
+      returned_model: 'unexpected-model',
+    },
+  },
+])(
+  'shows only the request model in self log details with metadata %j',
+  (other) => {
+    const queryClient = renderDetails(other)
+    expect(rowValue('Request Model')).toBe('wan2.5-i2v-preview')
+    expect(screen.queryByText('Model Mapping')).not.toBeInTheDocument()
+    expect(screen.queryByText('Actual Model')).not.toBeInTheDocument()
+    expect(screen.queryByText('Upstream Model')).not.toBeInTheDocument()
+    expect(screen.queryByText('Response Model')).not.toBeInTheDocument()
+    expect(screen.queryByText('mapped-model')).not.toBeInTheDocument()
+    expect(screen.queryByText(/unexpected-model/)).not.toBeInTheDocument()
+    expect(screen.queryByText('observation-request-model')).not.toBeInTheDocument()
+    queryClient.clear()
+  }
+)
 
 describe('usage facts billing details', () => {
   test('shows the settled image count and a per-image price', () => {

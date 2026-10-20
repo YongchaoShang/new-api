@@ -16,6 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import {
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+} from '@tanstack/react-table'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, it, vi } from 'vitest'
@@ -26,7 +32,11 @@ import {
 } from '@/features/channels/lib/model-categories'
 import { getLobeIconNames } from '@/lib/lobe-icon'
 
+import { usageLogSchema } from '../../data/schema'
+import type { LogOtherData } from '../../types'
+import { useCommonLogsColumns } from '../columns/common-logs-columns'
 import { ModelBadge } from '../model-badge'
+import { UsageLogsProvider } from '../usage-logs-provider'
 
 const providers = [
   {
@@ -428,5 +438,73 @@ it.each([
     expect(
       screen.queryByText(/this warning alone does not prove model substitution/)
     ).not.toBeInTheDocument()
+  }
+)
+
+function DesktopModelCell(props: { isAdmin: boolean; other: LogOtherData }) {
+  const columns = useCommonLogsColumns(props.isAdmin, false)
+  const table = useReactTable({
+    data: [
+      usageLogSchema.parse({
+        id: 1,
+        user_id: 1,
+        created_at: 1,
+        type: 2,
+        content: '',
+        model_name: 'requested-model',
+        other: JSON.stringify(props.other),
+      }),
+    ],
+    columns,
+    getCoreRowModel: getCoreRowModel(),
+  })
+  const cell = table
+    .getRowModel()
+    .rows[0].getAllCells()
+    .find((item) => item.column.id === 'model_name')
+  if (!cell) throw new Error('The log must have a model column')
+  return flexRender(cell.column.columnDef.cell, cell.getContext())
+}
+
+it.each([
+  { is_model_mapped: true, upstream_model_name: 'mapped-model' },
+  {
+    is_model_mapped: true,
+    upstream_model_name: 'mapped-model',
+    response_model: {
+      requested_model: 'observation-request-model',
+      upstream_model: 'mapped-model',
+      returned_model: 'unexpected-model',
+    },
+  },
+])(
+  'only displays and copies the request model in the desktop self column with metadata %j',
+  async (other) => {
+    const user = userEvent.setup()
+    const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <UsageLogsProvider>
+          <DesktopModelCell isAdmin={false} other={other} />
+        </UsageLogsProvider>
+      </QueryClientProvider>
+    )
+    expect(screen.getByText('requested-model')).toBeVisible()
+    expect(
+      screen.queryByRole('button', { name: /^Model:/ })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('mapped-model')).not.toBeInTheDocument()
+    expect(screen.queryByText(/unexpected-model/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByText('observation-request-model')
+    ).not.toBeInTheDocument()
+    await user.click(screen.getByText('requested-model'))
+    expect(copy).toHaveBeenLastCalledWith('requested-model')
+    expect(screen.queryByText('Model Mapping')).not.toBeInTheDocument()
+    expect(screen.queryByText('Response Model')).not.toBeInTheDocument()
+    client.clear()
   }
 )
