@@ -24,12 +24,19 @@ import {
 } from '@tanstack/react-table'
 import { render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
+
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { usageLogSchema, type UsageLog } from '../../data/schema'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
 import { UsageLogsMobileList } from '../usage-logs-mobile-card'
-import { UsageLogsProvider, useUsageLogsContext } from '../usage-logs-provider'
+import {
+  UsageLogsProvider,
+  useLogsViewScope,
+  useUsageLogsContext,
+} from '../usage-logs-provider'
 
 const longName = 'enterprise-production-failover-2026-without-any-short-alias'
 const log = usageLogSchema.parse({
@@ -56,12 +63,13 @@ const log = usageLogSchema.parse({
 })
 
 function Fixture(props: {
-  admin?: boolean
+  role?: number
   visibility?: VisibilityState
   logs?: UsageLog[]
   loading?: boolean
 }) {
-  const columns = useCommonLogsColumns(props.admin ?? true, false)
+  const scope = useLogsViewScope()
+  const columns = useCommonLogsColumns(scope.isAdminView, scope.isRootView)
   const context = useUsageLogsContext()
   const table = useReactTable({
     data: props.logs ?? [log],
@@ -74,6 +82,14 @@ function Fixture(props: {
       <button type='button' onClick={() => context.setSensitiveVisible(false)}>
         Hide sensitive data
       </button>
+      <button
+        type='button'
+        onClick={() =>
+          scope.setViewScope(scope.viewScope === 'all' ? 'self' : 'all')
+        }
+      >
+        Switch scope
+      </button>
       <UsageLogsMobileList
         table={table}
         logCategory='common'
@@ -83,13 +99,27 @@ function Fixture(props: {
   )
 }
 
+const clients: QueryClient[] = []
+
+afterEach(() => {
+  for (const client of clients) client.clear()
+  clients.length = 0
+  useAuthStore.setState(useAuthStore.getInitialState(), true)
+  localStorage.clear()
+})
+
 function renderLogs(props: Parameters<typeof Fixture>[0] = {}) {
+  useAuthStore.getState().auth.setUser({
+    id: 2,
+    username: 'tester',
+    role: props.role ?? ROLE.ADMIN,
+  })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  clients.push(client)
   return render(
-    <QueryClientProvider
-      client={
-        new QueryClient({ defaultOptions: { queries: { retry: false } } })
-      }
-    >
+    <QueryClientProvider client={client}>
       <UsageLogsProvider>
         <Fixture {...props} />
       </UsageLogsProvider>
@@ -97,34 +127,38 @@ function renderLogs(props: Parameters<typeof Fixture>[0] = {}) {
   )
 }
 
-it('shows model mismatch evidence when tapping the mobile model badge', async () => {
-  const user = userEvent.setup()
-  renderLogs({
-    logs: [
-      {
-        ...log,
-        other: JSON.stringify({
-          response_model: {
-            requested_model: longName,
-            upstream_model: 'mapped-model',
-            returned_model: 'unexpected-model',
-          },
-        }),
-      },
-    ],
-  })
-  await user.click(
-    screen.getByRole('button', {
-      name: `Model: ${longName}, Response model: unexpected-model`,
+it.each([ROLE.ADMIN, ROLE.SUPER_ADMIN])(
+  'shows model mismatch evidence when role %s taps the mobile model badge in all view',
+  async (role) => {
+    const user = userEvent.setup()
+    renderLogs({
+      role,
+      logs: [
+        {
+          ...log,
+          other: JSON.stringify({
+            response_model: {
+              requested_model: longName,
+              upstream_model: 'mapped-model',
+              returned_model: 'unexpected-model',
+            },
+          }),
+        },
+      ],
     })
-  )
-  const dialog = await screen.findByRole('dialog', { name: 'Model' })
-  expect(
-    within(dialog).getByText('Response model: unexpected-model')
-  ).toBeVisible()
-  expect(within(dialog).getByText('mapped-model')).toBeVisible()
-  expect(within(dialog).getByText('unexpected-model')).toBeVisible()
-})
+    await user.click(
+      screen.getByRole('button', {
+        name: `Model: ${longName}, Response model: unexpected-model`,
+      })
+    )
+    const dialog = await screen.findByRole('dialog', { name: 'Model' })
+    expect(
+      within(dialog).getByText('Response model: unexpected-model')
+    ).toBeVisible()
+    expect(within(dialog).getByText('mapped-model')).toBeVisible()
+    expect(within(dialog).getByText('unexpected-model')).toBeVisible()
+  }
+)
 
 it('opens long channel text on tap and copies the complete value', async () => {
   const user = userEvent.setup()
@@ -207,7 +241,7 @@ it('hides sensitive names and disables full-text inspection when privacy is enab
 
 it('respects hidden columns and omits admin fields in the self view', () => {
   renderLogs({
-    admin: false,
+    role: ROLE.USER,
     visibility: { token_name: false, model_name: false },
   })
   expect(
@@ -337,3 +371,75 @@ it('shows loading placeholders without displaying stale log fields', () => {
     screen.queryByRole('button', { name: /^Model:/ })
   ).not.toBeInTheDocument()
 })
+
+const modelMetadata = {
+  is_model_mapped: true,
+  upstream_model_name: 'mapped-model',
+  response_model: {
+    requested_model: 'observation-request-model',
+    upstream_model: 'mapped-model',
+    returned_model: 'unexpected-model',
+  },
+}
+
+it.each([
+  { role: ROLE.USER, self: false, other: modelMetadata },
+  {
+    role: ROLE.USER,
+    self: false,
+    other: { is_model_mapped: true, upstream_model_name: 'mapped-model' },
+  },
+  { role: ROLE.ADMIN, self: true, other: modelMetadata },
+  { role: ROLE.SUPER_ADMIN, self: true, other: modelMetadata },
+])(
+  'only shows and copies the request model in restricted mobile view (role=$role, self=$self, metadata=$other)',
+  async ({ role, self, other }) => {
+    const user = userEvent.setup()
+    const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
+    renderLogs({ role, logs: [{ ...log, other: JSON.stringify(other) }] })
+    if (self) {
+      await user.click(screen.getByRole('button', { name: 'Switch scope' }))
+    }
+
+    const model = screen.getByRole('button', { name: `Model: ${longName}` })
+    expect(model).not.toHaveAttribute('aria-haspopup')
+    expect(screen.queryByText('mapped-model')).not.toBeInTheDocument()
+    expect(screen.queryByText(/unexpected-model/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/observation-request-model/)
+    ).not.toBeInTheDocument()
+    await user.click(model)
+    expect(copy).toHaveBeenLastCalledWith(longName)
+    expect(
+      screen.queryByRole('dialog', { name: 'Model' })
+    ).not.toBeInTheDocument()
+    model.focus()
+    await user.keyboard('{Enter}')
+    expect(copy).toHaveBeenLastCalledWith(longName)
+  }
+)
+
+it.each([ROLE.ADMIN, ROLE.SUPER_ADMIN])(
+  'removes model diagnostics when role %s switches to self and restores them in all view',
+  async (role) => {
+    const user = userEvent.setup()
+    renderLogs({ role, logs: [{ ...log, other: JSON.stringify(modelMetadata) }] })
+    const warning = 'Response model: unexpected-model'
+    expect(screen.getByText(warning)).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Switch scope' }))
+    expect(screen.queryByText(warning)).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: `Model: ${longName}` })
+    ).not.toHaveAttribute('aria-haspopup')
+    await user.click(screen.getByRole('button', { name: 'Switch scope' }))
+    expect(screen.getByText(warning)).toBeVisible()
+    await user.click(
+      screen.getByRole('button', {
+        name: `Model: ${longName}, ${warning}`,
+      })
+    )
+    const dialog = await screen.findByRole('dialog', { name: 'Model' })
+    expect(within(dialog).getByText('mapped-model')).toBeVisible()
+    expect(within(dialog).getByText('unexpected-model')).toBeVisible()
+  }
+)

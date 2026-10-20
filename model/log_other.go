@@ -244,7 +244,16 @@ func formatLogOtherJSON(value string, visibility logOtherVisibility) string {
 
 	changed := false
 	if visibility == logOtherVisibilityUser {
-		for _, key := range []string{logOtherAdminInfoKey, logOtherRootInfoKey, logOtherAuditInfoKey} {
+		// Keep model diagnostics in storage for administrators, but self/token
+		// log responses expose only the requested model in Log.ModelName.
+		for _, key := range []string{
+			logOtherAdminInfoKey,
+			logOtherRootInfoKey,
+			logOtherAuditInfoKey,
+			"is_model_mapped",
+			"upstream_model_name",
+			"response_model",
+		} {
 			if _, exists := values[key]; exists {
 				delete(values, key)
 				changed = true

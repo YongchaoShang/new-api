@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -8,6 +9,78 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLogFormattingModelVisibility(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields map[string]any
+	}{
+		{"mapping", map[string]any{"is_model_mapped": true, "upstream_model_name": "mapped-model"}},
+		{"response", map[string]any{"response_model": map[string]any{"upstream_model": "requested-model", "returned_model": "requested-model"}}},
+		{"mapping and response mismatch", map[string]any{"is_model_mapped": true, "upstream_model_name": "mapped-model", "response_model": map[string]any{"upstream_model": "mapped-model", "returned_model": "unexpected-model"}}},
+		{"no model metadata", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			other := NewLogOther()
+			require.True(t, other.SetPublic("request_path", "/v1/chat/completions"))
+			require.True(t, other.SetPublic("public_id", int64(9007199254740993)))
+			for key, value := range tc.fields {
+				require.True(t, other.SetPublic(key, value), "model metadata must remain stored for administrators")
+			}
+			stored := other.JSONString()
+			var original map[string]json.RawMessage
+			require.NoError(t, common.UnmarshalJsonStr(stored, &original))
+
+			for _, role := range []string{"user", "admin", "root"} {
+				t.Run(role, func(t *testing.T) {
+					logs := []*Log{{ModelName: "requested-model", Other: stored}}
+					switch role {
+					case "user":
+						formatUserLogs(logs, 0)
+					case "admin":
+						FormatAdminLogs(logs)
+					case "root":
+						FormatRootLogs(logs)
+					}
+
+					assert.Equal(t, "requested-model", logs[0].ModelName)
+					var projected map[string]json.RawMessage
+					require.NoError(t, common.UnmarshalJsonStr(logs[0].Other, &projected))
+					assert.Equal(t, original["request_path"], projected["request_path"])
+					assert.Equal(t, "9007199254740993", string(projected["public_id"]))
+					for key := range tc.fields {
+						if role == "user" {
+							assert.NotContains(t, projected, key)
+						} else {
+							assert.Equal(t, original[key], projected[key])
+						}
+					}
+					assert.Equal(t, stored, other.JSONString(), "read projections must not change stored metadata")
+				})
+			}
+		})
+	}
+}
+
+func TestFormatUserLogsHandlesInvalidModelMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, other, expected string
+	}{
+		{"empty", "", ""},
+		{"null", "null", "null"},
+		{"malformed", `{"upstream_model_name":"secret-model"`, "{}"},
+		{"array", `[{"response_model":{"returned_model":"secret-model"}}]`, "{}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := []*Log{{ModelName: "requested-model", Other: tc.other}}
+
+			formatUserLogs(logs, 0)
+
+			assert.Equal(t, "requested-model", logs[0].ModelName)
+			assert.Equal(t, tc.expected, logs[0].Other)
+		})
+	}
+}
 
 // TestFormatUserLogsStripsQuotaSaturation verifies the admin-only quota
 // saturation marker (nested under other.admin_info) is removed for non-admin

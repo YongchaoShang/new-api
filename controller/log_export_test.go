@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -50,14 +51,46 @@ func exportedRequestIds(lines []map[string]any) []any {
 	return ids
 }
 
+func assertLogModelVisibility(t *testing.T, log map[string]any, detailsVisible bool, now int64) {
+	t.Helper()
+	assert.Equal(t, "a-1", log["request_id"])
+	assert.Equal(t, "gpt-a", log["model_name"])
+	assert.EqualValues(t, 1, log["user_id"])
+	assert.EqualValues(t, now-3600, log["created_at"])
+	assert.EqualValues(t, model.LogTypeConsume, log["type"])
+	assert.EqualValues(t, 10, log["quota"])
+	assert.EqualValues(t, 17, log["prompt_tokens"])
+	assert.EqualValues(t, 23, log["completion_tokens"])
+	assert.EqualValues(t, 4, log["use_time"])
+	assert.Equal(t, true, log["is_stream"])
+	otherJSON, ok := log["other"].(string)
+	require.True(t, ok)
+	var other map[string]json.RawMessage
+	require.NoError(t, common.UnmarshalJsonStr(otherJSON, &other))
+	assert.Equal(t, `"/v1/chat/completions"`, string(other["request_path"]))
+	assert.Equal(t, "0.004", string(other["model_price"]))
+	assert.Equal(t, "9007199254740993", string(other["public_id"]))
+	for key, expected := range map[string]string{
+		"is_model_mapped":     "true",
+		"upstream_model_name": `"mapped-model"`,
+		"response_model":      `{"upstream_model":"mapped-model","returned_model":"unexpected-model"}`,
+	} {
+		if detailsVisible {
+			assert.JSONEq(t, expected, string(other[key]), key)
+		} else {
+			assert.NotContains(t, other, key)
+		}
+	}
+}
+
 // seedExportLogs stores logs of two users: three in the last hour and one
 // from 400 days ago.
 func seedExportLogs(t *testing.T, mainDB *gorm.DB, logDB *gorm.DB, now int64) {
 	t.Helper()
 	require.NoError(t, mainDB.Create(&model.Channel{Id: 9, Name: "primary"}).Error)
 	logs := []model.Log{
-		{UserId: 1, Username: "alice", CreatedAt: now - 3600, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 9, Quota: 10, RequestId: "a-1", Other: `{"admin_info":{"use_channel":["9"]}}`},
-		{UserId: 2, Username: "bob", CreatedAt: now - 1800, Type: model.LogTypeConsume, ModelName: "gpt-b", ChannelId: 9, Quota: 20, RequestId: "b-1"},
+		{UserId: 1, Username: "alice", CreatedAt: now - 3600, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 9, TokenId: 101, Quota: 10, PromptTokens: 17, CompletionTokens: 23, UseTime: 4, IsStream: true, RequestId: "a-1", Other: `{"request_path":"/v1/chat/completions","model_price":0.004,"public_id":9007199254740993,"is_model_mapped":true,"upstream_model_name":"mapped-model","response_model":{"upstream_model":"mapped-model","returned_model":"unexpected-model"},"admin_info":{"use_channel":["9"]}}`},
+		{UserId: 2, Username: "bob", CreatedAt: now - 1800, Type: model.LogTypeConsume, ModelName: "gpt-b", ChannelId: 9, TokenId: 202, Quota: 20, RequestId: "b-1"},
 		{UserId: 1, Username: "alice", CreatedAt: now - 60, Type: model.LogTypeError, ModelName: "gpt-a", RequestId: "a-2"},
 		{UserId: 1, Username: "alice", CreatedAt: now - 400*24*3600, Type: model.LogTypeConsume, ModelName: "gpt-a", RequestId: "a-old"},
 	}
@@ -146,6 +179,62 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			assert.Equal(t, "primary", all[2]["channel_name"])
 			assert.Contains(t, all[2]["other"], "admin_info")
 			assert.Equal(t, true, all[3]["success"])
+
+			for _, role := range []int{common.RoleCommonUser, common.RoleAdminUser, common.RoleRootUser} {
+				t.Run(fmt.Sprintf("self role=%d", role), func(t *testing.T) {
+					// Supplying another username must not change the self scope.
+					selfQuery := query + "&username=bob"
+					response := callLogHandler(t, GetUserLogs, 1, role, selfQuery)[0]
+					require.Equal(t, true, response["success"])
+					data, ok := response["data"].(map[string]any)
+					require.True(t, ok)
+					assert.EqualValues(t, 2, data["total"])
+					items, ok := data["items"].([]any)
+					require.True(t, ok)
+					require.Len(t, items, 2)
+					log, ok := items[1].(map[string]any)
+					require.True(t, ok)
+					assertLogModelVisibility(t, log, false, now)
+
+					exported := callLogHandler(t, ExportUserLogs, 1, role, selfQuery)
+					require.Len(t, exported, 3)
+					assert.Equal(t, []any{"a-2", "a-1"}, exportedRequestIds(exported))
+					assertLogModelVisibility(t, exported[1], false, now)
+				})
+			}
+
+			for _, role := range []int{common.RoleAdminUser, common.RoleRootUser} {
+				t.Run(fmt.Sprintf("all role=%d", role), func(t *testing.T) {
+					response := callLogHandler(t, GetAllLogs, 3, role, query+"&username=alice")[0]
+					require.Equal(t, true, response["success"])
+					data, ok := response["data"].(map[string]any)
+					require.True(t, ok)
+					items, ok := data["items"].([]any)
+					require.True(t, ok)
+					require.Len(t, items, 2)
+					log, ok := items[1].(map[string]any)
+					require.True(t, ok)
+					assertLogModelVisibility(t, log, true, now)
+
+					exported := callLogHandler(t, ExportAllLogs, 3, role, query+"&username=alice")
+					require.Len(t, exported, 3)
+					assertLogModelVisibility(t, exported[1], true, now)
+				})
+			}
+
+			t.Run("token scope", func(t *testing.T) {
+				response := callLogHandler(t, func(ctx *gin.Context) {
+					ctx.Set("token_id", 101)
+					GetLogByKey(ctx)
+				}, 1, common.RoleCommonUser, query+"&token_id=202&username=bob")[0]
+				require.Equal(t, true, response["success"])
+				items, ok := response["data"].([]any)
+				require.True(t, ok)
+				require.Len(t, items, 1)
+				log, ok := items[0].(map[string]any)
+				require.True(t, ok)
+				assertLogModelVisibility(t, log, false, now)
+			})
 		})
 	}
 }

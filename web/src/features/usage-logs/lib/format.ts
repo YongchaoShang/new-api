@@ -234,14 +234,21 @@ export function getResponseTimeColor(
 }
 
 /**
- * Format model name with mapping indicator
+ * Format model data for the effective usage-log view permissions.
  */
-export function formatModelName(log: UsageLog): {
+export function formatModelName(
+  log: UsageLog,
+  canViewModelDetails: boolean
+): {
   name: string
   isMapped: boolean
   actualModel?: string
   responseModel?: LogOtherData['response_model']
 } {
+  if (!canViewModelDetails) {
+    return { name: log.model_name, isMapped: false }
+  }
+
   const other = parseLogOther(log.other)
   const isMapped = !!(
     other?.is_model_mapped &&

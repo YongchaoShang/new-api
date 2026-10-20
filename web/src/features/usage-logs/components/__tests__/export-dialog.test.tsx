@@ -40,7 +40,7 @@ import { STATUS_QUERY_KEY } from '@/lib/status-query'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { ExportLogsDialog } from '../dialogs/export-logs-dialog'
-import { UsageLogsProvider } from '../usage-logs-provider'
+import { UsageLogsProvider, useLogsViewScope } from '../usage-logs-provider'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const createObjectURL = vi.fn((_blob: Blob) => 'blob:logs')
@@ -63,6 +63,22 @@ afterEach(() => {
   Reflect.deleteProperty(URL, 'revokeObjectURL')
   useAuthStore.getState().auth.reset()
 })
+
+function ExportScopeControls() {
+  const scope = useLogsViewScope()
+  if (!scope.canManageScope) return null
+
+  return (
+    <button
+      type='button'
+      onClick={() =>
+        scope.setViewScope(scope.viewScope === 'all' ? 'self' : 'all')
+      }
+    >
+      {scope.viewScope === 'all' ? 'Only Mine' : 'All'}
+    </button>
+  )
+}
 
 function renderExport(options: {
   role: number
@@ -89,6 +105,7 @@ function renderExport(options: {
     component: () => (
       <UsageLogsProvider>
         <h1>Common Logs</h1>
+        <ExportScopeControls />
         <ExportLogsDialog />
       </UsageLogsProvider>
     ),
@@ -165,61 +182,110 @@ it('blocks a range longer than the configured limit before any request', async (
   expect(fetchSpy).not.toHaveBeenCalled()
 })
 
-it('downloads the streamed logs of the current filters as CSV', async () => {
-  const fetchSpy = mockExportResponse([
-    {
-      id: 1,
-      created_at: 1760000000,
-      type: 2,
-      content: '',
-      token_name: 'prod',
-      model_name: 'gpt-4o',
-      quota: 0,
-      other: '',
-      request_id: 'req-2',
-    },
-    {
-      id: 2,
-      created_at: 1759990000,
-      type: 2,
-      content: '',
-      token_name: 'prod',
-      model_name: 'gpt-4o',
-      quota: 0,
-      other: '',
-      request_id: 'req-1',
-    },
-    { success: true, message: '', data: { count: 2 } },
-  ])
-  const success = vi.spyOn(toast, 'success')
-  const user = userEvent.setup()
-  const range = recentRange()
-  renderExport({ role: ROLE.USER, search: { ...range, model: 'gpt-4o' } })
+it.each([
+  { label: 'user', role: ROLE.USER, self: true, adminView: false },
+  { label: 'admin self', role: ROLE.ADMIN, self: true, adminView: false },
+  {
+    label: 'root self',
+    role: ROLE.SUPER_ADMIN,
+    self: true,
+    adminView: false,
+  },
+  { label: 'admin all', role: ROLE.ADMIN, self: false, adminView: true },
+  {
+    label: 'root all',
+    role: ROLE.SUPER_ADMIN,
+    self: false,
+    adminView: true,
+  },
+])(
+  'downloads $label logs using the current view and filters as CSV',
+  async (view) => {
+    const fetchSpy = mockExportResponse([
+      {
+        id: 1,
+        created_at: 1760000000,
+        type: 2,
+        content: '',
+        token_name: 'prod',
+        model_name: 'gpt-4o',
+        username: 'alice',
+        channel: 9,
+        channel_name: 'primary',
+        quota: 0,
+        other: JSON.stringify({
+          is_model_mapped: true,
+          upstream_model_name: 'mapped-model',
+          response_model: {
+            requested_model: 'gpt-4o',
+            upstream_model: 'mapped-model',
+            returned_model: 'unexpected-model',
+          },
+        }),
+        request_id: 'req-2',
+      },
+      {
+        id: 2,
+        created_at: 1759990000,
+        type: 2,
+        content: '',
+        token_name: 'prod',
+        model_name: 'gpt-4o',
+        quota: 0,
+        other: '',
+        request_id: 'req-1',
+      },
+      { success: true, message: '', data: { count: 2 } },
+    ])
+    const success = vi.spyOn(toast, 'success')
+    const user = userEvent.setup()
+    const range = recentRange()
+    renderExport({ role: view.role, search: { ...range, model: 'gpt-4o' } })
 
-  await user.click(await screen.findByRole('button', { name: 'Export' }))
-  await user.click(
-    within(screen.getByRole('dialog')).getByRole('button', { name: 'Export' })
-  )
+    if (view.self && view.role >= ROLE.ADMIN) {
+      await user.click(await screen.findByRole('button', { name: 'Only Mine' }))
+    }
 
-  await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1))
-  const [url] = fetchSpy.mock.calls[0]
-  const params = new URL(String(url), 'http://localhost').searchParams
-  expect(String(url)).toMatch(/^\/api\/log\/self\/export\?/)
-  expect(params.get('model_name')).toBe('gpt-4o')
-  expect(params.get('start_timestamp')).toBe(
-    String(Math.floor(range.startTime / 1000))
-  )
-  expect(params.has('p')).toBe(false)
-  const file = createObjectURL.mock.calls[0][0]
-  const bytes = new Uint8Array(await file.arrayBuffer())
-  expect(bytes.subarray(0, 3)).toEqual(new Uint8Array([0xef, 0xbb, 0xbf]))
-  const rows = (await file.text()).trimEnd().split('\r\n')
-  expect(rows).toHaveLength(3)
-  expect(rows[1]).toContain('"req-2"')
-  expect(rows[2]).toContain('"req-1"')
-  expect(success).toHaveBeenCalledWith('Exported 2 logs')
-  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-})
+    await user.click(await screen.findByRole('button', { name: 'Export' }))
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Export' })
+    )
+
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1))
+    const [url] = fetchSpy.mock.calls[0]
+    const params = new URL(String(url), 'http://localhost').searchParams
+    expect(new URL(String(url), 'http://localhost').pathname).toBe(
+      view.adminView ? '/api/log/export' : '/api/log/self/export'
+    )
+    expect(params.get('model_name')).toBe('gpt-4o')
+    expect(params.get('start_timestamp')).toBe(
+      String(Math.floor(range.startTime / 1000))
+    )
+    expect(params.has('p')).toBe(false)
+    const file = createObjectURL.mock.calls[0][0]
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    expect(bytes.subarray(0, 3)).toEqual(new Uint8Array([0xef, 0xbb, 0xbf]))
+    const rows = (await file.text()).trimEnd().split('\r\n')
+    expect(rows).toHaveLength(3)
+    expect(rows[1]).toContain('"gpt-4o"')
+    expect(rows.join('\n')).not.toMatch(/mapped-model|unexpected-model/)
+    if (view.adminView) {
+      expect(rows[0]).toContain('"User"')
+      expect(rows[0]).toContain('"Channel"')
+      expect(rows[1]).toContain('"alice"')
+      expect(rows[1]).toContain('"#9 primary"')
+    } else {
+      expect(rows[0]).not.toContain('"User"')
+      expect(rows[0]).not.toContain('"Channel"')
+      expect(rows[1]).not.toContain('"alice"')
+      expect(rows[1]).not.toContain('"#9 primary"')
+    }
+    expect(rows[1]).toContain('"req-2"')
+    expect(rows[2]).toContain('"req-1"')
+    expect(success).toHaveBeenCalledWith('Exported 2 logs')
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  }
+)
 
 it('reports a server refusal and keeps the dialog open without a download', async () => {
   mockExportResponse([
