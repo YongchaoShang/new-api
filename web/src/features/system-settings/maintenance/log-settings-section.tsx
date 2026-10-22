@@ -22,6 +22,7 @@ import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import * as z from 'zod'
 
+import { TagInput } from '@/components/tag-input'
 import {
   Form,
   FormControl,
@@ -53,6 +54,8 @@ const logSettingsSchema = z.object({
   log_setting: z.object({
     user_export_enabled: z.boolean(),
     max_range_days: z.number().int().min(1),
+    redaction_keywords: z.array(z.string()),
+    pending_redaction_keyword: z.string(),
   }),
 })
 
@@ -63,6 +66,7 @@ type LogSettingsSectionProps = {
     LogConsumeEnabled: boolean
     'log_setting.user_export_enabled': boolean
     'log_setting.max_range_days': number
+    'log_setting.redaction_keywords': string[]
   }
 }
 
@@ -71,6 +75,7 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
   const updateOption = useUpdateOption()
   const recordingTitleId = useId()
   const searchTitleId = useId()
+  const redactionTitleId = useId()
   const formDefaults = useMemo<LogSettingsFormValues>(
     () => ({
       LogConsumeEnabled: props.defaultValues.LogConsumeEnabled,
@@ -78,6 +83,9 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
         user_export_enabled:
           props.defaultValues['log_setting.user_export_enabled'],
         max_range_days: props.defaultValues['log_setting.max_range_days'],
+        redaction_keywords:
+          props.defaultValues['log_setting.redaction_keywords'],
+        pending_redaction_keyword: '',
       },
     }),
     [props.defaultValues]
@@ -88,10 +96,20 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
   })
 
   useEffect(() => {
-    form.reset(formDefaults)
+    // Refetching a partially saved form must not discard unsaved edits.
+    form.reset(formDefaults, { keepDirtyValues: true })
   }, [formDefaults, form])
 
   const onSubmit = async (values: LogSettingsFormValues) => {
+    const keywords = [...values.log_setting.redaction_keywords]
+    const pendingKeyword = values.log_setting.pending_redaction_keyword.trim()
+    if (pendingKeyword && !keywords.includes(pendingKeyword)) {
+      keywords.push(pendingKeyword)
+    }
+    form.setValue('log_setting.redaction_keywords', keywords, {
+      shouldDirty: true,
+    })
+    form.setValue('log_setting.pending_redaction_keyword', '')
     const changes = [
       ['LogConsumeEnabled', values.LogConsumeEnabled],
       [
@@ -99,10 +117,27 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
         values.log_setting.user_export_enabled,
       ],
       ['log_setting.max_range_days', values.log_setting.max_range_days],
+      ['log_setting.redaction_keywords', JSON.stringify(keywords)],
     ] as const
-    for (const [key, value] of changes) {
-      if (value === props.defaultValues[key]) continue
-      await updateOption.mutateAsync({ key, value })
+    try {
+      for (const [key, value] of changes) {
+        const original = props.defaultValues[key]
+        const savedValue = Array.isArray(original)
+          ? JSON.stringify(original)
+          : original
+        if (value === savedValue) continue
+        await updateOption.mutateAsync({ key, value })
+      }
+      form.reset({
+        ...values,
+        log_setting: {
+          ...values.log_setting,
+          redaction_keywords: keywords,
+          pending_redaction_keyword: '',
+        },
+      })
+    } catch {
+      // useUpdateOption displays the error; keep the form available for retry.
     }
   }
 
@@ -112,7 +147,10 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
         <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
           <SettingsPageFormActions
             onSave={form.handleSubmit(onSubmit)}
-            isSaving={updateOption.isPending}
+            isSaving={form.formState.isSubmitting}
+            isSaveDisabled={
+              Object.keys(form.formState.dirtyFields).length === 0
+            }
             saveLabel='Save log settings'
           />
           <div
@@ -140,6 +178,7 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
                     <Switch
                       checked={field.value}
                       onCheckedChange={field.onChange}
+                      disabled={form.formState.isSubmitting}
                     />
                   </FormControl>
                   <FormMessage />
@@ -176,6 +215,7 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
                       <Switch
                         checked={field.value}
                         onCheckedChange={field.onChange}
+                        disabled={form.formState.isSubmitting}
                       />
                     </FormControl>
                     <FormMessage />
@@ -194,6 +234,7 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
                         min={1}
                         step={1}
                         {...safeNumberFieldProps(field)}
+                        disabled={form.formState.isSubmitting}
                       />
                     </FormControl>
                     <FormDescription>
@@ -206,6 +247,53 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
                 )}
               />
             </SettingsFormGrid>
+          </div>
+
+          <Separator />
+
+          <div
+            role='group'
+            aria-labelledby={redactionTitleId}
+            className='flex min-w-0 flex-col gap-4'
+          >
+            <h4 id={redactionTitleId} className='font-medium'>
+              {t('User log redaction')}
+            </h4>
+            <FormField
+              control={form.control}
+              name='log_setting.redaction_keywords'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Redaction keywords')}</FormLabel>
+                  <FormControl>
+                    <TagInput
+                      value={field.value}
+                      onChange={field.onChange}
+                      onBlur={field.onBlur}
+                      name={field.name}
+                      disabled={form.formState.isSubmitting}
+                      placeholder={t('Add a redaction keyword')}
+                      inputValue={form.watch(
+                        'log_setting.pending_redaction_keyword'
+                      )}
+                      onInputValueChange={(value) =>
+                        form.setValue(
+                          'log_setting.pending_redaction_keyword',
+                          value,
+                          { shouldDirty: true }
+                        )
+                      }
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Matching keywords in future error messages are replaced with ***. Matching is case-insensitive and does not support regular expressions. Clearing keywords keeps the existing upstream information redaction.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
           </div>
         </SettingsForm>
       </Form>

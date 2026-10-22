@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"unicode/utf8"
 )
 
 var (
@@ -22,7 +24,62 @@ var (
 	maskBracketedIPv6Pattern = regexp.MustCompile(`\[([0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*)(%[^\]\s]*)?\]`)
 	// maskApiKeyPattern matches patterns like 'api_key:xxx' or "api_key:xxx" to mask the API key value
 	maskApiKeyPattern = regexp.MustCompile(`(['"]?)api_key:([^\s'"]+)(['"]?)`)
+
+	redactionKeywords atomic.Pointer[RedactionRules]
 )
+
+// RedactionRules is an immutable snapshot prepared before the host persists
+// configuration. Its patterns are safe to share between concurrent readers.
+type RedactionRules struct {
+	keywords []string
+	patterns []*regexp.Regexp
+}
+
+// CompileRedactionKeywords prepares literal, case-insensitive redaction rules
+// without changing the active rules. Longer keywords run first; equal-length
+// keywords retain their input order. Empty configuration returns nil rules.
+func CompileRedactionKeywords(keywords []string) (*RedactionRules, error) {
+	normalized := make([]string, 0, len(keywords))
+	for _, keyword := range keywords {
+		keyword = strings.TrimSpace(keyword)
+		if keyword == "" || slices.ContainsFunc(normalized, func(existing string) bool {
+			return strings.EqualFold(existing, keyword)
+		}) {
+			continue
+		}
+		normalized = append(normalized, keyword)
+	}
+	slices.SortStableFunc(normalized, func(a, b string) int {
+		return utf8.RuneCountInString(b) - utf8.RuneCountInString(a)
+	})
+
+	if len(normalized) == 0 {
+		return nil, nil
+	}
+	current := redactionKeywords.Load()
+	if current != nil && slices.EqualFunc(current.keywords, normalized, strings.EqualFold) {
+		return current, nil
+	}
+
+	snapshot := &RedactionRules{
+		keywords: normalized,
+		patterns: make([]*regexp.Regexp, len(normalized)),
+	}
+	for i, keyword := range normalized {
+		pattern, err := regexp.Compile(`(?i)` + regexp.QuoteMeta(keyword))
+		if err != nil {
+			return nil, err
+		}
+		snapshot.patterns[i] = pattern
+	}
+	return snapshot, nil
+}
+
+// SetRedactionKeywords atomically publishes prepared rules. The host calls this
+// only after configuration takes effect; nil disables keyword redaction.
+func SetRedactionKeywords(rules *RedactionRules) {
+	redactionKeywords.Store(rules)
+}
 
 // maskHostTail returns the tail parts of a domain/host that should be preserved.
 // It keeps 2 parts for likely country-code TLDs (e.g., co.uk, com.cn), otherwise keeps only the TLD.
@@ -91,7 +148,8 @@ func maskURLQuery(rawQuery string) string {
 // addresses are masked regardless of the upstream: API key values, the query
 // values and userinfo of every URL, which carry secrets such as client_secret
 // or key on provider endpoints, and IPs, which in network errors include the
-// gateway's own address.
+// gateway's own address. Configured redaction keywords are then replaced with
+// *** regardless of whether an upstream address is available.
 // Example with upstream https://api.upstream.example.com:
 // https://api.upstream.example.com/v1/chat?key=secret -> https://***.com/***/***?key=***
 // lookup api.upstream.example.com -> lookup ***.***.***.com
@@ -201,10 +259,6 @@ func MaskSensitiveInfo(str string, upstreamURLs ...string) string {
 		return "[***]"
 	})
 	str = maskIPPattern.ReplaceAllString(str, "***.***.***.***")
-	if len(upstreamHosts) == 0 {
-		return str
-	}
-
 	// Mask an upstream host where it appears without a scheme, as in
 	// "dial tcp: lookup api.example.com: no such host". Longer hosts go first
 	// so a subdomain upstream is masked whole before its parent base host.
@@ -215,6 +269,12 @@ func MaskSensitiveInfo(str string, upstreamURLs ...string) string {
 		}
 		hostPattern := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(host) + `\b`)
 		str = hostPattern.ReplaceAllStringFunc(str, maskHostForPlainDomain)
+	}
+
+	if snapshot := redactionKeywords.Load(); snapshot != nil {
+		for _, pattern := range snapshot.patterns {
+			str = pattern.ReplaceAllLiteralString(str, "***")
+		}
 	}
 
 	return str
