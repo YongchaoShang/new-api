@@ -4,9 +4,12 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMaskSensitiveInfoMasksOnlyTheUpstreamAddress(t *testing.T) {
+	SetRedactionKeywords(nil)
+	t.Cleanup(func() { SetRedactionKeywords(nil) })
 	tests := []struct {
 		name         string
 		upstreamURLs []string
@@ -133,4 +136,102 @@ func TestMaskSensitiveInfoMasksOnlyTheUpstreamAddress(t *testing.T) {
 			assert.Equal(t, tt.want, MaskSensitiveInfo(tt.input, tt.upstreamURLs...))
 		})
 	}
+}
+
+func TestMaskSensitiveInfoRedactsConfiguredKeywords(t *testing.T) {
+	tests := []struct {
+		name         string
+		keywords     []string
+		upstreamURLs []string
+		input        string
+		want         string
+	}{
+		{
+			name:     "case insensitive substrings and repeated matches without upstream",
+			keywords: []string{"VendorAlpha"},
+			input:    "vendoralpha VENDORALPHA prefixVendorAlphasuffix unchanged",
+			want:     "*** *** prefix***suffix unchanged",
+		},
+		{
+			name:     "Chinese phrases and Unicode case folding",
+			keywords: []string{"供应商名称", "private provider", "k"},
+			input:    "供应商名称 PRIVATE PROVIDER K K unchanged",
+			want:     "*** *** *** *** unchanged",
+		},
+		{
+			name:     "regular expression syntax is literal",
+			keywords: []string{"a.b", "(token)", "$value"},
+			input:    "A.B axb (TOKEN) token $VALUE value",
+			want:     "*** axb *** token *** value",
+		},
+		{
+			name:     "longer keywords run before shorter keywords",
+			keywords: []string{"vendor", "VendorAlpha"},
+			input:    "VendorAlpha vendor",
+			want:     "*** ***",
+		},
+		{
+			name:     "equal length overlap retains input order without merging",
+			keywords: []string{"abc", "bcd"},
+			input:    "abcd",
+			want:     "***d",
+		},
+		{
+			name:     "reversed input order changes equal length overlap",
+			keywords: []string{"bcd", "abc"},
+			input:    "abcd",
+			want:     "a***",
+		},
+		{
+			name:     "normalization ignores empty entries and duplicate casing",
+			keywords: []string{" ", " abc ", "ABC", "bcd"},
+			input:    "abcd abc ABC",
+			want:     "***d *** ***",
+		},
+		{
+			name:         "keywords extend existing upstream URL and credential masks",
+			keywords:     []string{"VendorAlpha", "docs.example.org"},
+			upstreamURLs: []string{"https://api.upstream.example.com"},
+			input:        `VendorAlpha https://api.upstream.example.com/v1?key=secret docs.example.org api_key:secret 10.0.0.1`,
+			want:         `*** https://***.com/***?key=*** *** api_key:*** ***.***.***.***`,
+		},
+		{
+			name:     "empty configuration preserves only existing masks",
+			keywords: nil,
+			input:    "VendorAlpha api_key:secret 10.0.0.1",
+			want:     "VendorAlpha api_key:*** ***.***.***.***",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Cleanup(func() { SetRedactionKeywords(nil) })
+			rules, err := CompileRedactionKeywords(tt.keywords)
+			require.NoError(t, err)
+			SetRedactionKeywords(rules)
+			assert.Equal(t, tt.want, MaskSensitiveInfo(tt.input, tt.upstreamURLs...))
+		})
+	}
+}
+
+func TestMaskSensitiveInfoKeywordUpdatesOwnTheirInputAndCanBeCleared(t *testing.T) {
+	t.Cleanup(func() { SetRedactionKeywords(nil) })
+	keywords := []string{"first"}
+	rules, err := CompileRedactionKeywords(keywords)
+	require.NoError(t, err)
+	SetRedactionKeywords(rules)
+	keywords[0] = "second"
+	assert.Equal(t, "*** second", MaskSensitiveInfo("first second"))
+
+	rules, err = CompileRedactionKeywords(keywords)
+	require.NoError(t, err)
+	assert.Equal(t, "*** second", MaskSensitiveInfo("first second"), "preparing rules must not publish them")
+	SetRedactionKeywords(rules)
+	assert.Equal(t, "first ***", MaskSensitiveInfo("first second"))
+
+	_, err = CompileRedactionKeywords([]string{string([]byte{0xff})})
+	require.Error(t, err)
+	assert.Equal(t, "first ***", MaskSensitiveInfo("first second"), "invalid rules must not replace effective rules")
+
+	SetRedactionKeywords(nil)
+	assert.Equal(t, "first second api_key:***", MaskSensitiveInfo("first second api_key:secret"))
 }

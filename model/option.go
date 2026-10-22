@@ -4,11 +4,13 @@ import (
 	"maps"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -22,6 +24,11 @@ type Option struct {
 	Key   string `json:"key" gorm:"primaryKey"`
 	Value string `json:"value"`
 }
+
+// Serialize keyword saves with database reloads so a stale reload cannot
+// replace the snapshot published by a newer successful save. Acquire this
+// before the request-policy and passkey option locks.
+var logRedactionOptionMutex sync.Mutex
 
 func AllOption() ([]*Option, error) {
 	var options []*Option
@@ -200,6 +207,8 @@ func InitOptionMap() {
 }
 
 func loadOptionsFromDatabase() {
+	logRedactionOptionMutex.Lock()
+	defer logRedactionOptionMutex.Unlock()
 	requestPolicyOptionMutex.Lock()
 	defer requestPolicyOptionMutex.Unlock()
 	defer func() {
@@ -287,6 +296,14 @@ func validateOptionValue(key string, value string) error {
 	if key == operation_setting.LogMaxRangeDaysOptionKey {
 		return operation_setting.ValidateLogMaxRangeDays(value)
 	}
+	if key == operation_setting.LogRedactionKeywordsOptionKey {
+		keywords, err := operation_setting.ParseLogRedactionKeywords(value)
+		if err != nil {
+			return err
+		}
+		_, err = kitutil.CompileRedactionKeywords(keywords)
+		return err
+	}
 	if key == operation_setting.CheckinAllowedQuotaOptionKey {
 		return operation_setting.ValidateCheckinAllowedQuota(value)
 	}
@@ -297,7 +314,7 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
-	if key == system_setting.DiscordGuildRulesOptionKey || key == operation_setting.CheckinAllowedQuotaOptionKey {
+	if key == system_setting.DiscordGuildRulesOptionKey || key == operation_setting.CheckinAllowedQuotaOptionKey || key == operation_setting.LogRedactionKeywordsOptionKey {
 		return UpdateOptionsBulk(map[string]string{key: value})
 	}
 	if IsRequestPolicyOption(key) {
@@ -336,6 +353,27 @@ func UpdateOption(key string, value string) error {
 func UpdateOptionsBulk(values map[string]string) error {
 	if len(values) == 0 {
 		return nil
+	}
+	var redactionKeywords []string
+	var redactionRules *kitutil.RedactionRules
+	if raw, ok := values[operation_setting.LogRedactionKeywordsOptionKey]; ok {
+		logRedactionOptionMutex.Lock()
+		defer logRedactionOptionMutex.Unlock()
+		var err error
+		redactionKeywords, err = operation_setting.ParseLogRedactionKeywords(raw)
+		if err != nil {
+			return err
+		}
+		redactionRules, err = kitutil.CompileRedactionKeywords(redactionKeywords)
+		if err != nil {
+			return err
+		}
+		encoded, err := common.Marshal(redactionKeywords)
+		if err != nil {
+			return err
+		}
+		values = maps.Clone(values)
+		values[operation_setting.LogRedactionKeywordsOptionKey] = string(encoded)
 	}
 	if raw, ok := values[system_setting.DiscordGuildRulesOptionKey]; ok {
 		rules, err := system_setting.ParseDiscordGuildRules(raw)
@@ -403,6 +441,10 @@ func UpdateOptionsBulk(values map[string]string) error {
 		return err
 	}
 	for k, v := range values {
+		if k == operation_setting.LogRedactionKeywordsOptionKey {
+			publishLogRedactionKeywords(v, redactionKeywords, redactionRules)
+			continue
+		}
 		if err := updateOptionMap(k, v); err != nil {
 			return err
 		}
@@ -413,7 +455,31 @@ func UpdateOptionsBulk(values map[string]string) error {
 	return nil
 }
 
+func publishLogRedactionKeywords(value string, keywords []string, rules *kitutil.RedactionRules) {
+	common.OptionMapRWMutex.Lock()
+	defer common.OptionMapRWMutex.Unlock()
+	common.OptionMap[operation_setting.LogRedactionKeywordsOptionKey] = value
+	operation_setting.GetLogSetting().RedactionKeywords = keywords
+	kitutil.SetRedactionKeywords(rules)
+}
+
 func updateOptionMap(key string, value string) (err error) {
+	if key == operation_setting.LogRedactionKeywordsOptionKey {
+		keywords, err := operation_setting.ParseLogRedactionKeywords(value)
+		if err != nil {
+			return err
+		}
+		rules, err := kitutil.CompileRedactionKeywords(keywords)
+		if err != nil {
+			return err
+		}
+		encoded, err := common.Marshal(keywords)
+		if err != nil {
+			return err
+		}
+		publishLogRedactionKeywords(string(encoded), keywords, rules)
+		return nil
+	}
 	if key == operation_setting.CheckinAllowedQuotaOptionKey {
 		if err := operation_setting.ValidateCheckinAllowedQuota(value); err != nil {
 			return err
